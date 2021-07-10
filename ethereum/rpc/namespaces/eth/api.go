@@ -275,6 +275,11 @@ func (e *PublicAPI) GetBlockTransactionCountByHash(hash common.Hash) *hexutil.Ui
 		return nil
 	}
 
+	if resBlock.Block == nil {
+		zero := hexutil.Uint(0)
+		return &zero
+	}
+
 	n := hexutil.Uint(len(resBlock.Block.Txs))
 	return &n
 }
