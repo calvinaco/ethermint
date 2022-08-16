@@ -1,0 +1,388 @@
+package precompiles
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math/big"
+
+	"github.com/cosmos/cosmos-sdk/codec"
+	"github.com/cosmos/cosmos-sdk/codec/types"
+	sdk "github.com/cosmos/cosmos-sdk/types"
+	capabilitykeeper "github.com/cosmos/cosmos-sdk/x/capability/keeper"
+	icacontrollerkeeper "github.com/cosmos/ibc-go/v3/modules/apps/27-interchain-accounts/controller/keeper"
+	icatypes "github.com/cosmos/ibc-go/v3/modules/apps/27-interchain-accounts/types"
+	ibcchannelkeeper "github.com/cosmos/ibc-go/v3/modules/core/04-channel/keeper"
+	host "github.com/cosmos/ibc-go/v3/modules/core/24-host"
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/evmos/ethermint/x/evm/statedb"
+)
+
+var (
+	RegisterAccountMethod               abi.Method
+	QueryAccountMethod                  abi.Method
+	QueryAccountOpenActiveChannelMethod abi.Method
+	SubmitMsgsMethod                    abi.Method
+
+	_ statedb.StatefulPrecompiledContract = (*IcaContract)(nil)
+	_ statedb.JournalEntry                = icaMessageChange{}
+)
+
+func init() {
+	addressType, _ := abi.NewType("address", "", nil)
+	stringType, _ := abi.NewType("string", "", nil)
+	uint256Type, _ := abi.NewType("uint256", "", nil)
+	RegisterAccountMethod = abi.NewMethod(
+		"registerAccount", "registerAccount", abi.Function, "", false, false, abi.Arguments{abi.Argument{
+			Name: "connectionID",
+			Type: stringType,
+		}, abi.Argument{
+			Name: "account",
+			Type: addressType,
+		}},
+		nil,
+	)
+	QueryAccountMethod = abi.NewMethod(
+		"queryAccount", "queryAccount", abi.Function, "", false, false, abi.Arguments{abi.Argument{
+			Name: "connectionID",
+			Type: stringType,
+		}, abi.Argument{
+			Name: "account",
+			Type: addressType,
+		}},
+		abi.Arguments{abi.Argument{
+			Name: "icaAccount",
+			Type: stringType,
+		}},
+	)
+	QueryAccountOpenActiveChannelMethod = abi.NewMethod(
+		"queryAccountOpenActiveChannel", "queryAccountOpenActiveChannel", abi.Function, "", false, false, abi.Arguments{abi.Argument{
+			Name: "connectionID",
+			Type: stringType,
+		}, abi.Argument{
+			Name: "account",
+			Type: addressType,
+		}},
+		abi.Arguments{abi.Argument{
+			Name: "channelID",
+			Type: stringType,
+		}},
+	)
+	SubmitMsgsMethod = abi.NewMethod(
+		"submitMsgs", "submitMsgs", abi.Function, "", false, false, abi.Arguments{abi.Argument{
+			Name: "connectionID",
+			Type: stringType,
+		}, abi.Argument{
+			Name: "sender",
+			Type: addressType,
+		}, abi.Argument{
+			Name: "msgs",
+			Type: stringType,
+		}, abi.Argument{
+			Name: "timeout",
+			Type: uint256Type,
+		}},
+		abi.Arguments{abi.Argument{
+			Name: "packetSequence",
+			Type: uint256Type,
+		}},
+	)
+}
+
+type IcaContract struct {
+	ctx                 sdk.Context
+	cdc                 codec.BinaryCodec
+	protoCodec          *codec.ProtoCodec
+	channelKeeper       *ibcchannelkeeper.Keeper
+	icaControllerKeeper *icacontrollerkeeper.Keeper
+	scopedKeeper        *capabilitykeeper.ScopedKeeper
+	msgs                []icaMessage
+}
+
+func NewIcaContractCreator(
+	cdc codec.BinaryCodec,
+	interfaceRegistry types.InterfaceRegistry,
+	channelKeeper *ibcchannelkeeper.Keeper,
+	icaControllerKeeper *icacontrollerkeeper.Keeper,
+	scopedKeeper *capabilitykeeper.ScopedKeeper,
+) statedb.PrecompiledContractCreator {
+	protoCodec := codec.NewProtoCodec(interfaceRegistry)
+	return func(ctx sdk.Context) statedb.StatefulPrecompiledContract {
+		msgs := make([]icaMessage, 0)
+		return &IcaContract{
+			ctx,
+			cdc,
+			protoCodec,
+			channelKeeper,
+			icaControllerKeeper,
+			scopedKeeper,
+			msgs,
+		}
+	}
+}
+
+// RequiredGas calculates the contract gas use
+func (ic *IcaContract) RequiredGas(input []byte) uint64 {
+	// TODO estimate required gas
+	return 0
+}
+
+func (ic *IcaContract) Run(evm *vm.EVM, input []byte, caller common.Address, value *big.Int, readonly bool) ([]byte, error) {
+	stateDB, ok := evm.StateDB.(ExtStateDB)
+	if !ok {
+		return nil, errors.New("not run in ethermint")
+	}
+	methodID := input[:4]
+	switch string(methodID) {
+	case string(RegisterAccountMethod.ID):
+		if readonly {
+			return nil, errors.New("the method is not readonly")
+		}
+		args, err := RegisterAccountMethod.Inputs.Unpack(input[4:])
+		if err != nil {
+			return nil, errors.New("fail to unpack input arguments")
+		}
+		connectionID := args[0].(string)
+		account := args[1].(common.Address)
+		evmTxSender := evm.TxContext.Origin
+
+		if !isSameAddress(account, caller) && !isSameAddress(account, evmTxSender) {
+			return nil, errors.New("unauthorized account registration")
+		}
+		msg := &icaRegisterAccountMessage{
+			connectionID,
+			account,
+		}
+		ic.msgs = append(ic.msgs, msg)
+		stateDB.AppendJournalEntry(icaMessageChange{ic, caller, evmTxSender, msg})
+
+		fmt.Printf(
+			"RegisterAccountMethod connectionId: %s, account: %s\n",
+			connectionID, account,
+		)
+		return nil, nil
+	case string(QueryAccountMethod.ID):
+		args, err := QueryAccountMethod.Inputs.Unpack(input[4:])
+		if err != nil {
+			return nil, errors.New("fail to unpack input arguments")
+		}
+
+		connectionID := args[0].(string)
+		account := args[1].(common.Address)
+
+		owner := sdk.AccAddress(common.HexToAddress(account.String()).Bytes())
+		portID, err := icatypes.NewControllerPortID(owner.String())
+		if err != nil {
+			return nil, fmt.Errorf("invalid owner address: %s", err)
+		}
+		fmt.Printf(
+			"QueryAccountMethod connectionId: %s, account: %s\n",
+			connectionID, account,
+		)
+
+		icaAddress, found := ic.icaControllerKeeper.GetInterchainAccountAddress(ic.ctx, connectionID, portID)
+		if !found {
+			return QueryAccountMethod.Outputs.Pack("")
+		}
+
+		return QueryAccountMethod.Outputs.Pack(icaAddress)
+	case string(QueryAccountOpenActiveChannelMethod.ID):
+		args, err := QueryAccountMethod.Inputs.Unpack(input[4:])
+		if err != nil {
+			return nil, errors.New("fail to unpack input arguments")
+		}
+
+		connectionID := args[0].(string)
+		account := args[1].(common.Address)
+
+		owner := sdk.AccAddress(common.HexToAddress(account.String()).Bytes())
+		portID, err := icatypes.NewControllerPortID(owner.String())
+		if err != nil {
+			return nil, fmt.Errorf("invalid owner address: %s", err)
+		}
+
+		channelID, found := ic.icaControllerKeeper.GetOpenActiveChannel(ic.ctx, connectionID, portID)
+		fmt.Printf(
+			"QueryAccountOpenActiveChannelMethod connectionId: %s, account: %s\n",
+			connectionID, account,
+		)
+
+		if !found {
+			return QueryAccountOpenActiveChannelMethod.Outputs.Pack("")
+		}
+		return QueryAccountOpenActiveChannelMethod.Outputs.Pack(channelID)
+	case string(SubmitMsgsMethod.ID):
+		if readonly {
+			return nil, errors.New("the method is not readonly")
+		}
+		args, err := SubmitMsgsMethod.Inputs.Unpack(input[4:])
+		if err != nil {
+			return nil, errors.New("fail to unpack input arguments")
+		}
+		connectionID := args[0].(string)
+		sender := args[1].(common.Address)
+		msgs := args[2].(string)
+		timeout := args[3].(*big.Int)
+		evmTxSender := evm.TxContext.Origin
+
+		if !isSameAddress(sender, caller) && !isSameAddress(sender, evmTxSender) {
+			return nil, errors.New("unauthorized account registration")
+		}
+
+		var rawSdkMsgs []json.RawMessage
+		if err := json.Unmarshal([]byte(msgs), &rawSdkMsgs); err != nil {
+			return nil, fmt.Errorf("invalid Cosmos messages: %s", err)
+		}
+		sdkMsgs := make([]sdk.Msg, len(rawSdkMsgs))
+		for i, rawSdkMsg := range rawSdkMsgs {
+			var sdkMsg sdk.Msg
+			if err := ic.protoCodec.UnmarshalInterfaceJSON([]byte(rawSdkMsg), &sdkMsg); err != nil {
+				return nil, fmt.Errorf("invalid Cosmos messages: %s", err)
+			}
+			sdkMsgs[i] = sdkMsg
+		}
+		timeoutTimestamp := uint64(ic.ctx.BlockTime().UnixNano()) + timeout.Uint64()
+
+		senderAccAddr := sdk.AccAddress(common.HexToAddress(sender.String()).Bytes()).String()
+		portID, err := icatypes.NewControllerPortID(senderAccAddr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid sender address: %s", err)
+		}
+		channelID, found := ic.icaControllerKeeper.GetOpenActiveChannel(ic.ctx, connectionID, portID)
+		if !found {
+			return nil, fmt.Errorf("failed to retrieve active channel for port %s", portID)
+		}
+
+		// FIXME: keep track of next sequence for each portId-channelId
+		packetSequence, _ := ic.channelKeeper.GetNextSequenceSend(ic.ctx, portID, channelID)
+
+		msg := &icaSubmitMsgsMessage{
+			connectionID:           connectionID,
+			sender:                 sender,
+			msgs:                   sdkMsgs,
+			timeoutTimestamp:       timeoutTimestamp,
+			expectedPacketSequence: packetSequence,
+		}
+		ic.msgs = append(ic.msgs, msg)
+		stateDB.AppendJournalEntry(icaMessageChange{ic, caller, evmTxSender, msg})
+
+		fmt.Printf(
+			"SubmitMsgsMethod connectionId: %s, account: %s, msgs: %s, timeoutTimestamp: %d, expectedPacketSequence: %d\n",
+			connectionID, sender, msgs, timeoutTimestamp, packetSequence,
+		)
+		return SubmitMsgsMethod.Outputs.Pack(new(big.Int).SetUint64(packetSequence))
+
+	default:
+		return nil, errors.New("unknown method")
+	}
+}
+
+func (ic *IcaContract) Commit(ctx sdk.Context) error {
+	fmt.Println("ica precompile commit phase")
+	for _, msg := range ic.msgs {
+		switch msg.MsgType() {
+		case icaRegisterAccountMessageType:
+			typedMessage := msg.(*icaRegisterAccountMessage)
+			owner := sdk.AccAddress(common.HexToAddress(typedMessage.account.String()).Bytes()).String()
+			fmt.Printf(
+				"RegisterAccountMethod going to be committed connectionID: %s, account: %s\n",
+				typedMessage.connectionID, typedMessage.account,
+			)
+			return ic.icaControllerKeeper.RegisterInterchainAccount(ic.ctx, typedMessage.connectionID, owner)
+		case icaSubmitMsgsMessageType:
+			typedMessage := msg.(*icaSubmitMsgsMessage)
+			sender := sdk.AccAddress(common.HexToAddress(typedMessage.sender.String()).Bytes()).String()
+
+			portID, err := icatypes.NewControllerPortID(sender)
+			if err != nil {
+				return fmt.Errorf("invalid owner address: %s", err)
+			}
+
+			channelID, found := ic.icaControllerKeeper.GetOpenActiveChannel(ctx, typedMessage.connectionID, portID)
+			if !found {
+				return fmt.Errorf("failed to retrieve active open channel of connection: %s, port %s", typedMessage.connectionID, portID)
+			}
+
+			channelCapability, found := ic.scopedKeeper.GetCapability(ctx, host.ChannelCapabilityPath(portID, channelID))
+			if !found {
+				return errors.New("module does not own channel capability")
+			}
+
+			data, err := icatypes.SerializeCosmosTx(ic.cdc, typedMessage.msgs)
+			if err != nil {
+				return fmt.Errorf("failed to serialize Cosmos Tx from messages: %s", err)
+			}
+
+			packetData := icatypes.InterchainAccountPacketData{
+				Type: icatypes.EXECUTE_TX,
+				Data: data,
+			}
+
+			fmt.Printf(
+				"SubmitMsgsMethod sending ICA transaction with connectionID %s, portID: %s, packetData: %s, timeoutTimestamp: %d\n",
+				typedMessage.connectionID, portID, packetData, typedMessage.timeoutTimestamp,
+			)
+			packetSequence, err := ic.icaControllerKeeper.SendTx(ctx, channelCapability, typedMessage.connectionID, portID, packetData, typedMessage.timeoutTimestamp)
+			if err != nil {
+				return fmt.Errorf("failed to send ICA transaction: %s", err)
+			}
+
+			// failsafe for multi-precompile race conditions
+			// if a contract calls multiple precompile which send IBC packets to the same connection and port, the
+			// sequence returned to the contract maybe wrong
+			if packetSequence != typedMessage.expectedPacketSequence {
+				return fmt.Errorf("packet sequence mismatched, expected: %d, actual: %d", typedMessage.expectedPacketSequence, packetSequence)
+			}
+			return nil
+		}
+	}
+	return nil
+}
+
+type icaMessage interface {
+	MsgType() string
+}
+
+const icaRegisterAccountMessageType = "RegisterAccount"
+const icaSubmitMsgsMessageType = "SubmitMsgs"
+
+type icaRegisterAccountMessage struct {
+	connectionID string
+	account      common.Address
+}
+
+func (msg icaRegisterAccountMessage) MsgType() string {
+	return icaRegisterAccountMessageType
+}
+
+type icaSubmitMsgsMessage struct {
+	connectionID           string
+	sender                 common.Address
+	msgs                   []sdk.Msg
+	timeoutTimestamp       uint64
+	expectedPacketSequence uint64
+}
+
+func (msg icaSubmitMsgsMessage) MsgType() string {
+	return icaSubmitMsgsMessageType
+}
+
+type icaMessageChange struct {
+	ic          *IcaContract
+	caller      common.Address
+	evmTxSender common.Address
+	msg         icaMessage
+}
+
+func (ch icaMessageChange) Revert(*statedb.StateDB) {}
+
+func (ch icaMessageChange) Dirtied() *common.Address {
+	return nil
+}
+
+func isSameAddress(a common.Address, b common.Address) bool {
+	return bytes.Compare(a.Bytes(), b.Bytes()) == 0
+}
