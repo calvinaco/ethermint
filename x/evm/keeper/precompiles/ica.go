@@ -28,7 +28,7 @@ var (
 	SubmitMsgsMethod                    abi.Method
 
 	_ statedb.StatefulPrecompiledContract = (*IcaContract)(nil)
-	_ statedb.JournalEntry                = icaMessageChange{}
+	_ statedb.JournalEntry                = icaJournalEntry{}
 )
 
 func init() {
@@ -157,7 +157,7 @@ func (ic *IcaContract) Run(evm *vm.EVM, input []byte, caller common.Address, val
 			account,
 		}
 		ic.msgs = append(ic.msgs, msg)
-		stateDB.AppendJournalEntry(icaMessageChange{ic, caller, evmTxSender, msg})
+		stateDB.AppendJournalEntry(icaJournalEntry{ic, caller, evmTxSender, msg})
 
 		fmt.Printf(
 			"RegisterAccountMethod connectionId: %s, account: %s\n",
@@ -267,7 +267,7 @@ func (ic *IcaContract) Run(evm *vm.EVM, input []byte, caller common.Address, val
 			expectedPacketSequence: packetSequence,
 		}
 		ic.msgs = append(ic.msgs, msg)
-		stateDB.AppendJournalEntry(icaMessageChange{ic, caller, evmTxSender, msg})
+		stateDB.AppendJournalEntry(icaJournalEntry{ic, caller, evmTxSender, msg})
 
 		fmt.Printf(
 			"SubmitMsgsMethod connectionId: %s, account: %s, msgs: %s, timeoutTimestamp: %d, expectedPacketSequence: %d\n",
@@ -283,7 +283,11 @@ func (ic *IcaContract) Run(evm *vm.EVM, input []byte, caller common.Address, val
 func (ic *IcaContract) Commit(ctx sdk.Context) error {
 	fmt.Println("ica precompile commit phase")
 	for _, msg := range ic.msgs {
-		switch msg.MsgType() {
+		if msg.isDirty() {
+			continue
+		}
+
+		switch msg.messageType() {
 		case icaRegisterAccountMessageType:
 			typedMessage := msg.(*icaRegisterAccountMessage)
 			owner := sdk.AccAddress(common.HexToAddress(typedMessage.account.String()).Bytes()).String()
@@ -331,8 +335,8 @@ func (ic *IcaContract) Commit(ctx sdk.Context) error {
 			}
 
 			// failsafe for multi-precompile race conditions
-			// if a contract calls multiple precompile which send IBC packets to the same connection and port, the
-			// sequence returned to the contract maybe wrong
+			// if a contract calls multiple precompiles that send IBC packets to the same connection and port, the
+			// packet sequence returned to the contract could be wrong as each precompile has no knowledge of each other
 			if packetSequence != typedMessage.expectedPacketSequence {
 				return fmt.Errorf("packet sequence mismatched, expected: %d, actual: %d", typedMessage.expectedPacketSequence, packetSequence)
 			}
@@ -342,23 +346,57 @@ func (ic *IcaContract) Commit(ctx sdk.Context) error {
 	return nil
 }
 
+type icaJournalEntry struct {
+	ic          *IcaContract
+	caller      common.Address
+	evmTxSender common.Address
+	msg         icaMessage
+}
+
+func (entry icaJournalEntry) Revert(*statedb.StateDB) {
+	entry.msg.setDirty(true)
+}
+
+func (entry icaJournalEntry) Dirtied() *common.Address {
+	return nil
+}
+
 type icaMessage interface {
-	MsgType() string
+	messageType() string
+	setDirty(bool)
+	isDirty() bool
+}
+
+type icaMessageBase struct {
+	dirty bool
+}
+
+func (base *icaMessageBase) setDirty(dirty bool) {
+	base.dirty = dirty
+}
+func (base *icaMessageBase) isDirty() bool {
+	return base.dirty
 }
 
 const icaRegisterAccountMessageType = "RegisterAccount"
 const icaSubmitMsgsMessageType = "SubmitMsgs"
 
+var _ icaMessage = &icaRegisterAccountMessage{}
+
 type icaRegisterAccountMessage struct {
+	icaMessageBase
 	connectionID string
 	account      common.Address
 }
 
-func (msg icaRegisterAccountMessage) MsgType() string {
+func (msg icaRegisterAccountMessage) messageType() string {
 	return icaRegisterAccountMessageType
 }
 
+var _ icaMessage = &icaSubmitMsgsMessage{}
+
 type icaSubmitMsgsMessage struct {
+	icaMessageBase
 	connectionID           string
 	sender                 common.Address
 	msgs                   []sdk.Msg
@@ -366,21 +404,8 @@ type icaSubmitMsgsMessage struct {
 	expectedPacketSequence uint64
 }
 
-func (msg icaSubmitMsgsMessage) MsgType() string {
+func (msg icaSubmitMsgsMessage) messageType() string {
 	return icaSubmitMsgsMessageType
-}
-
-type icaMessageChange struct {
-	ic          *IcaContract
-	caller      common.Address
-	evmTxSender common.Address
-	msg         icaMessage
-}
-
-func (ch icaMessageChange) Revert(*statedb.StateDB) {}
-
-func (ch icaMessageChange) Dirtied() *common.Address {
-	return nil
 }
 
 func isSameAddress(a common.Address, b common.Address) bool {
