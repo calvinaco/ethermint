@@ -99,7 +99,9 @@ type IcaContract struct {
 	channelKeeper       *ibcchannelkeeper.Keeper
 	icaControllerKeeper *icacontrollerkeeper.Keeper
 	scopedKeeper        *capabilitykeeper.ScopedKeeper
-	msgs                []icaMessage
+	callbacks           ICAModule
+
+	msgs []icaMessage
 }
 
 func NewIcaContractCreator(
@@ -108,6 +110,7 @@ func NewIcaContractCreator(
 	channelKeeper *ibcchannelkeeper.Keeper,
 	icaControllerKeeper *icacontrollerkeeper.Keeper,
 	scopedKeeper *capabilitykeeper.ScopedKeeper,
+	callbacks ICAModule,
 ) statedb.PrecompiledContractCreator {
 	protoCodec := codec.NewProtoCodec(interfaceRegistry)
 	return func(ctx sdk.Context) statedb.StatefulPrecompiledContract {
@@ -119,6 +122,7 @@ func NewIcaContractCreator(
 			channelKeeper,
 			icaControllerKeeper,
 			scopedKeeper,
+			callbacks,
 			msgs,
 		}
 	}
@@ -148,11 +152,19 @@ func (ic *IcaContract) Run(evm *vm.EVM, input []byte, caller common.Address, val
 		connectionID := args[0].(string)
 		account := args[1].(common.Address)
 		evmTxSender := evm.TxContext.Origin
+		evm.Origin.Hash()
 
 		if !isSameAddress(account, caller) && !isSameAddress(account, evmTxSender) {
 			return nil, errors.New("unauthorized account registration")
 		}
 		msg := &icaRegisterAccountMessage{
+			icaMessageBase{
+				ctx: ModuleContext{
+					Caller:   caller,
+					TxSender: evmTxSender,
+				},
+				dirty: false,
+			},
 			connectionID,
 			account,
 		}
@@ -260,6 +272,13 @@ func (ic *IcaContract) Run(evm *vm.EVM, input []byte, caller common.Address, val
 		packetSequence, _ := ic.channelKeeper.GetNextSequenceSend(ic.ctx, portID, channelID)
 
 		msg := &icaSubmitMsgsMessage{
+			icaMessageBase: icaMessageBase{
+				ctx: ModuleContext{
+					Caller:   caller,
+					TxSender: evmTxSender,
+				},
+				dirty: false,
+			},
 			connectionID:           connectionID,
 			sender:                 sender,
 			msgs:                   sdkMsgs,
@@ -295,7 +314,14 @@ func (ic *IcaContract) Commit(ctx sdk.Context) error {
 				"RegisterAccountMethod going to be committed connectionID: %s, account: %s\n",
 				typedMessage.connectionID, typedMessage.account,
 			)
-			return ic.icaControllerKeeper.RegisterInterchainAccount(ic.ctx, typedMessage.connectionID, owner)
+			if err := ic.icaControllerKeeper.RegisterInterchainAccount(ic.ctx, typedMessage.connectionID, owner); err != nil {
+				return err
+			}
+			if err := ic.callbacks.OnRegisterInterchainAccount(ic.ctx, msg.context(), typedMessage.connectionID, owner); err != nil {
+				return err
+			}
+
+			return nil
 		case icaSubmitMsgsMessageType:
 			typedMessage := msg.(*icaSubmitMsgsMessage)
 			sender := sdk.AccAddress(common.HexToAddress(typedMessage.sender.String()).Bytes()).String()
@@ -340,7 +366,10 @@ func (ic *IcaContract) Commit(ctx sdk.Context) error {
 			if packetSequence != typedMessage.expectedPacketSequence {
 				return fmt.Errorf("packet sequence mismatched, expected: %d, actual: %d", typedMessage.expectedPacketSequence, packetSequence)
 			}
-			return nil
+
+			return ic.callbacks.OnSendTx(
+				ctx, msg.context(), channelCapability, typedMessage.connectionID, channelID, portID, packetData, typedMessage.timeoutTimestamp, packetSequence,
+			)
 		}
 	}
 	return nil
@@ -362,15 +391,20 @@ func (entry icaJournalEntry) Dirtied() *common.Address {
 }
 
 type icaMessage interface {
+	context() ModuleContext
 	messageType() string
 	setDirty(bool)
 	isDirty() bool
 }
 
 type icaMessageBase struct {
+	ctx   ModuleContext
 	dirty bool
 }
 
+func (base *icaMessageBase) context() ModuleContext {
+	return base.ctx
+}
 func (base *icaMessageBase) setDirty(dirty bool) {
 	base.dirty = dirty
 }
