@@ -86,6 +86,9 @@ func init() {
 			Type: uint256Type,
 		}},
 		abi.Arguments{abi.Argument{
+			Name: "channelID",
+			Type: stringType,
+		}, abi.Argument{
 			Name: "packetSequence",
 			Type: uint256Type,
 		}},
@@ -240,17 +243,20 @@ func (ic *IcaContract) Run(evm *vm.EVM, input []byte, caller common.Address, val
 		evmTxSender := evm.TxContext.Origin
 
 		if !isSameAddress(owner, caller) && !isSameAddress(owner, evmTxSender) {
+			fmt.Println("unauthorized account registration")
 			return nil, errors.New("unauthorized account registration")
 		}
 
 		var rawSdkMsgs []json.RawMessage
 		if err := json.Unmarshal([]byte(msgs), &rawSdkMsgs); err != nil {
+			fmt.Printf("invalid Cosmos messages: %s\n", err)
 			return nil, fmt.Errorf("invalid Cosmos messages: %s", err)
 		}
 		sdkMsgs := make([]sdk.Msg, len(rawSdkMsgs))
 		for i, rawSdkMsg := range rawSdkMsgs {
 			var sdkMsg sdk.Msg
 			if err := ic.protoCodec.UnmarshalInterfaceJSON([]byte(rawSdkMsg), &sdkMsg); err != nil {
+				fmt.Printf("invalid Cosmos messages: %s\n", err)
 				return nil, fmt.Errorf("invalid Cosmos messages: %s", err)
 			}
 			sdkMsgs[i] = sdkMsg
@@ -259,10 +265,12 @@ func (ic *IcaContract) Run(evm *vm.EVM, input []byte, caller common.Address, val
 
 		portID, err := icatypes.NewControllerPortID(sdk.AccAddress(common.HexToAddress(owner.String()).Bytes()).String())
 		if err != nil {
+			fmt.Printf("invalid owner address: %s", err)
 			return nil, fmt.Errorf("invalid owner address: %s", err)
 		}
 		channelID, found := ic.icaControllerKeeper.GetOpenActiveChannel(ic.ctx, connectionID, portID)
 		if !found {
+			fmt.Printf("failed to retrieve active channel for port %s", portID)
 			return nil, fmt.Errorf("failed to retrieve active channel for port %s", portID)
 		}
 
@@ -290,7 +298,7 @@ func (ic *IcaContract) Run(evm *vm.EVM, input []byte, caller common.Address, val
 			"SubmitMsgsMethod connectionId: %s, owner: %s, msgs: %s, timeoutTimestamp: %d, expectedPacketSequence: %d\n",
 			connectionID, owner, msgs, timeoutTimestamp, packetSequence,
 		)
-		return SubmitMsgsMethod.Outputs.Pack(new(big.Int).SetUint64(packetSequence))
+		return SubmitMsgsMethod.Outputs.Pack(channelID, new(big.Int).SetUint64(packetSequence))
 
 	default:
 		return nil, errors.New("unknown method")
