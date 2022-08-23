@@ -40,7 +40,7 @@ func init() {
 			Name: "connectionID",
 			Type: stringType,
 		}, abi.Argument{
-			Name: "account",
+			Name: "owner",
 			Type: addressType,
 		}},
 		nil,
@@ -50,7 +50,7 @@ func init() {
 			Name: "connectionID",
 			Type: stringType,
 		}, abi.Argument{
-			Name: "account",
+			Name: "owner",
 			Type: addressType,
 		}},
 		abi.Arguments{abi.Argument{
@@ -63,7 +63,7 @@ func init() {
 			Name: "connectionID",
 			Type: stringType,
 		}, abi.Argument{
-			Name: "account",
+			Name: "owner",
 			Type: addressType,
 		}},
 		abi.Arguments{abi.Argument{
@@ -76,7 +76,7 @@ func init() {
 			Name: "connectionID",
 			Type: stringType,
 		}, abi.Argument{
-			Name: "sender",
+			Name: "owner",
 			Type: addressType,
 		}, abi.Argument{
 			Name: "msgs",
@@ -208,18 +208,17 @@ func (ic *IcaContract) Run(evm *vm.EVM, input []byte, caller common.Address, val
 		}
 
 		connectionID := args[0].(string)
-		account := args[1].(common.Address)
+		owner := args[1].(common.Address)
 
-		owner := sdk.AccAddress(common.HexToAddress(account.String()).Bytes())
-		portID, err := icatypes.NewControllerPortID(owner.String())
+		portID, err := icatypes.NewControllerPortID(sdk.AccAddress(common.HexToAddress(owner.String()).Bytes()).String())
 		if err != nil {
 			return nil, fmt.Errorf("invalid owner address: %s", err)
 		}
 
 		channelID, found := ic.icaControllerKeeper.GetOpenActiveChannel(ic.ctx, connectionID, portID)
 		fmt.Printf(
-			"QueryAccountOpenActiveChannelMethod connectionId: %s, account: %s\n",
-			connectionID, account,
+			"QueryAccountOpenActiveChannelMethod connectionId: %s, owner: %s\n",
+			connectionID, owner,
 		)
 
 		if !found {
@@ -235,12 +234,12 @@ func (ic *IcaContract) Run(evm *vm.EVM, input []byte, caller common.Address, val
 			return nil, errors.New("fail to unpack input arguments")
 		}
 		connectionID := args[0].(string)
-		sender := args[1].(common.Address)
+		owner := args[1].(common.Address)
 		msgs := args[2].(string)
 		timeout := args[3].(*big.Int)
 		evmTxSender := evm.TxContext.Origin
 
-		if !isSameAddress(sender, caller) && !isSameAddress(sender, evmTxSender) {
+		if !isSameAddress(owner, caller) && !isSameAddress(owner, evmTxSender) {
 			return nil, errors.New("unauthorized account registration")
 		}
 
@@ -258,10 +257,9 @@ func (ic *IcaContract) Run(evm *vm.EVM, input []byte, caller common.Address, val
 		}
 		timeoutTimestamp := uint64(ic.ctx.BlockTime().UnixNano()) + timeout.Uint64()
 
-		senderAccAddr := sdk.AccAddress(common.HexToAddress(sender.String()).Bytes()).String()
-		portID, err := icatypes.NewControllerPortID(senderAccAddr)
+		portID, err := icatypes.NewControllerPortID(sdk.AccAddress(common.HexToAddress(owner.String()).Bytes()).String())
 		if err != nil {
-			return nil, fmt.Errorf("invalid sender address: %s", err)
+			return nil, fmt.Errorf("invalid owner address: %s", err)
 		}
 		channelID, found := ic.icaControllerKeeper.GetOpenActiveChannel(ic.ctx, connectionID, portID)
 		if !found {
@@ -280,7 +278,7 @@ func (ic *IcaContract) Run(evm *vm.EVM, input []byte, caller common.Address, val
 				dirty: false,
 			},
 			connectionID:           connectionID,
-			sender:                 sender,
+			owner:                  owner,
 			msgs:                   sdkMsgs,
 			timeoutTimestamp:       timeoutTimestamp,
 			expectedPacketSequence: packetSequence,
@@ -289,8 +287,8 @@ func (ic *IcaContract) Run(evm *vm.EVM, input []byte, caller common.Address, val
 		stateDB.AppendJournalEntry(icaJournalEntry{ic, caller, evmTxSender, msg})
 
 		fmt.Printf(
-			"SubmitMsgsMethod connectionId: %s, account: %s, msgs: %s, timeoutTimestamp: %d, expectedPacketSequence: %d\n",
-			connectionID, sender, msgs, timeoutTimestamp, packetSequence,
+			"SubmitMsgsMethod connectionId: %s, owner: %s, msgs: %s, timeoutTimestamp: %d, expectedPacketSequence: %d\n",
+			connectionID, owner, msgs, timeoutTimestamp, packetSequence,
 		)
 		return SubmitMsgsMethod.Outputs.Pack(new(big.Int).SetUint64(packetSequence))
 
@@ -309,40 +307,46 @@ func (ic *IcaContract) Commit(ctx sdk.Context) error {
 		switch msg.messageType() {
 		case icaRegisterAccountMessageType:
 			typedMessage := msg.(*icaRegisterAccountMessage)
-			owner := sdk.AccAddress(common.HexToAddress(typedMessage.account.String()).Bytes()).String()
+			owner := sdk.AccAddress(common.HexToAddress(typedMessage.owner.String()).Bytes()).String()
 			fmt.Printf(
 				"RegisterAccountMethod going to be committed connectionID: %s, account: %s\n",
-				typedMessage.connectionID, typedMessage.account,
+				typedMessage.connectionID, typedMessage.owner,
 			)
 			if err := ic.icaControllerKeeper.RegisterInterchainAccount(ic.ctx, typedMessage.connectionID, owner); err != nil {
+				fmt.Println(err)
 				return err
 			}
 			if err := ic.callbacks.OnRegisterInterchainAccount(ic.ctx, msg.context(), typedMessage.connectionID, owner); err != nil {
+				fmt.Println(err)
 				return err
 			}
 
 			return nil
 		case icaSubmitMsgsMessageType:
 			typedMessage := msg.(*icaSubmitMsgsMessage)
-			sender := sdk.AccAddress(common.HexToAddress(typedMessage.sender.String()).Bytes()).String()
+			owner := sdk.AccAddress(common.HexToAddress(typedMessage.owner.String()).Bytes()).String()
 
-			portID, err := icatypes.NewControllerPortID(sender)
+			portID, err := icatypes.NewControllerPortID(owner)
 			if err != nil {
+				fmt.Printf("invalid owner address: %s\n", err)
 				return fmt.Errorf("invalid owner address: %s", err)
 			}
 
 			channelID, found := ic.icaControllerKeeper.GetOpenActiveChannel(ctx, typedMessage.connectionID, portID)
 			if !found {
+				fmt.Printf("failed to retrieve active open channel of connection: %s, port %s\n", typedMessage.connectionID, portID)
 				return fmt.Errorf("failed to retrieve active open channel of connection: %s, port %s", typedMessage.connectionID, portID)
 			}
 
 			channelCapability, found := ic.scopedKeeper.GetCapability(ctx, host.ChannelCapabilityPath(portID, channelID))
 			if !found {
+				fmt.Println("module does not own channel capability")
 				return errors.New("module does not own channel capability")
 			}
 
 			data, err := icatypes.SerializeCosmosTx(ic.cdc, typedMessage.msgs)
 			if err != nil {
+				fmt.Printf("failed to serialize Cosmos Tx from messages: %s\n", err)
 				return fmt.Errorf("failed to serialize Cosmos Tx from messages: %s", err)
 			}
 
@@ -357,6 +361,7 @@ func (ic *IcaContract) Commit(ctx sdk.Context) error {
 			)
 			packetSequence, err := ic.icaControllerKeeper.SendTx(ctx, channelCapability, typedMessage.connectionID, portID, packetData, typedMessage.timeoutTimestamp)
 			if err != nil {
+				fmt.Printf("failed to send ICA transaction: %s\n", err)
 				return fmt.Errorf("failed to send ICA transaction: %s", err)
 			}
 
@@ -420,7 +425,7 @@ var _ icaMessage = &icaRegisterAccountMessage{}
 type icaRegisterAccountMessage struct {
 	icaMessageBase
 	connectionID string
-	account      common.Address
+	owner        common.Address
 }
 
 func (msg icaRegisterAccountMessage) messageType() string {
@@ -432,7 +437,7 @@ var _ icaMessage = &icaSubmitMsgsMessage{}
 type icaSubmitMsgsMessage struct {
 	icaMessageBase
 	connectionID           string
-	sender                 common.Address
+	owner                  common.Address
 	msgs                   []sdk.Msg
 	timeoutTimestamp       uint64
 	expectedPacketSequence uint64
