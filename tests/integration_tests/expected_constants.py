@@ -160,3 +160,32 @@ EXPECTED_CONTRACT_CREATE_TRACER = {
     "type": "CREATE",
     "value": "0x0",
 }
+
+
+EXPECTED_ETH_TX_FAILED_AT_ANTE_TRACER = [
+    {
+        "result": {
+            "from": "0xebf80ff512d5af394c2f86b39aa92670d6d3b15f",
+            "gas": "0x0",
+            "gasUsed": "0x0",
+            "input": "0x",
+            "output": "0x",
+            "to": "0xb6a2f15a37aac3b6fdd39afa356b64f51ca8314a",
+            "type": "CALL",
+            "value": "0x22b1c8c1227a00000"
+        }
+    },
+    {
+        "result": {
+            "from": "0xebf80ff512d5af394c2f86b39aa92670d6d3b15f",
+            "gas": "0x0",
+            "gasUsed": "0x0",
+            "input": "0x",
+            "output": "0x",
+            "to": "0xb6a2f15a37aac3b6fdd39afa356b64f51ca8314a",
+            "type": "CALL",
+            "value": "0x22b1c8c1227a00000"
+        }
+    },
+]
+

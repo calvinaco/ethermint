@@ -5,7 +5,7 @@ from eth_account import Account
 from web3 import Web3
 
 from .network import setup_ethermint
-from .utils import ADDRS, w3_wait_for_new_blocks
+from .utils import ADDRS, derive_new_address, w3_wait_for_new_blocks
 
 
 @pytest.fixture(scope="module")
@@ -30,13 +30,6 @@ def cluster(request, custom_ethermint, geth):
         yield geth
     else:
         raise NotImplementedError
-
-
-def derive_new_address(n=1):
-    # derive a new address
-    account_path = f"m/44'/60'/0'/0/{n}"
-    mnemonic = os.getenv("COMMUNITY_MNEMONIC")
-    return (Account.from_mnemonic(mnemonic, account_path=account_path)).address
 
 
 def test_get_transaction_count(cluster):

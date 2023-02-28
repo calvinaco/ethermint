@@ -162,6 +162,13 @@ def send_transaction(w3, tx, key=KEYS["validator"], i=0):
         return send_transaction(w3, tx, key, i + 1)
 
 
+# Sign and send raw transaction without waiting for block inclusion
+def send_raw_transaction_mempool(w3, tx, key=KEYS["validator"]):
+    signed = sign_transaction(w3, tx, key)
+    txhash = w3.eth.send_raw_transaction(signed.rawTransaction)
+    return txhash
+
+
 def send_successful_transaction(w3, i=0):
     if i > 3:
         raise TimeExhausted
@@ -197,3 +204,15 @@ def parse_events(logs):
         ev["type"]: {attr["key"]: attr["value"] for attr in ev["attributes"]}
         for ev in logs[0]["events"]
     }
+
+
+def derive_new_account(n=1, mnemonic=os.getenv("COMMUNITY_MNEMONIC")):
+    # derive a new address
+    account_path = f"m/44'/60'/0'/0/{n}"
+    return Account.from_mnemonic(mnemonic, account_path=account_path)
+
+
+def derive_new_address(n=1, mnemonic=os.getenv("COMMUNITY_MNEMONIC")):
+    account = derive_new_account(n, mnemonic)
+    return account.address
+

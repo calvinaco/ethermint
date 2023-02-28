@@ -94,8 +94,13 @@ func (a *API) TraceBlockByNumber(height rpctypes.BlockNumber, config *evmtypes.T
 		a.logger.Debug("get block failed", "height", height, "error", err.Error())
 		return nil, err
 	}
+	resBlockResult, err := a.backend.TendermintBlockResultByNumber(height.TmHeight())
+	if err != nil {
+		a.logger.Debug("get block results failed", "height", height, "error", err.Error())
+		return nil, err
+	}
 
-	return a.backend.TraceBlock(rpctypes.BlockNumber(resBlock.Block.Height), config, resBlock)
+	return a.backend.TraceBlock(rpctypes.BlockNumber(resBlock.Block.Height), config, resBlock, resBlockResult)
 }
 
 // TraceBlockByHash returns the structured logs created during the execution of
@@ -114,7 +119,13 @@ func (a *API) TraceBlockByHash(hash common.Hash, config *evmtypes.TraceConfig) (
 		return nil, errors.New("block not found")
 	}
 
-	return a.backend.TraceBlock(rpctypes.BlockNumber(resBlock.Block.Height), config, resBlock)
+	resBlockResult, err := a.backend.TendermintBlockResultByNumber(&resBlock.Block.Height)
+	if err != nil {
+		a.logger.Debug("get block results failed", "height", resBlock.Block.Height, "error", err.Error())
+		return nil, err
+	}
+
+	return a.backend.TraceBlock(rpctypes.BlockNumber(resBlock.Block.Height), config, resBlock, resBlockResult)
 }
 
 // BlockProfile turns on goroutine profiling for nsec seconds and writes profile data to

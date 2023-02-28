@@ -202,12 +202,19 @@ func (suite *BackendTestSuite) TestTraceBlock() {
 	filledBlock.ChainID = ChainID
 	resBlockEmpty := tmrpctypes.ResultBlock{Block: emptyBlock, BlockID: emptyBlock.LastBlockID}
 	resBlockFilled := tmrpctypes.ResultBlock{Block: filledBlock, BlockID: filledBlock.LastBlockID}
+	resBlockResultsEmpty := tmrpctypes.ResultBlockResults{Height: 1}
+	resBlockResultsFilled := tmrpctypes.ResultBlockResults{Height: 1, TxsResults: []*abci.ResponseDeliverTx{{
+		Code:      0,
+		GasWanted: int64(msgEthTx.GetGas()),
+		GasUsed:   int64(msgEthTx.GetGas()),
+	}}}
 
 	testCases := []struct {
 		name            string
 		registerMock    func()
 		expTraceResults []*evmtypes.TxTraceResult
 		resBlock        *tmrpctypes.ResultBlock
+		resBlockResults *tmrpctypes.ResultBlockResults
 		config          *evmtypes.TraceConfig
 		expPass         bool
 	}{
@@ -216,6 +223,7 @@ func (suite *BackendTestSuite) TestTraceBlock() {
 			func() {},
 			[]*evmtypes.TxTraceResult{},
 			&resBlockEmpty,
+			&resBlockResultsEmpty,
 			&evmtypes.TraceConfig{},
 			true,
 		},
@@ -227,6 +235,7 @@ func (suite *BackendTestSuite) TestTraceBlock() {
 			},
 			[]*evmtypes.TxTraceResult{},
 			&resBlockFilled,
+			&resBlockResultsFilled,
 			&evmtypes.TraceConfig{},
 			false,
 		},
@@ -237,7 +246,7 @@ func (suite *BackendTestSuite) TestTraceBlock() {
 			suite.SetupTest() // reset test and queries
 			tc.registerMock()
 
-			traceResults, err := suite.backend.TraceBlock(1, tc.config, tc.resBlock)
+			traceResults, err := suite.backend.TraceBlock(1, tc.config, tc.resBlock, tc.resBlockResults)
 
 			if tc.expPass {
 				suite.Require().NoError(err)

@@ -21,6 +21,7 @@ import (
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	rpctypes "github.com/evmos/ethermint/rpc/types"
 	evmtypes "github.com/evmos/ethermint/x/evm/types"
 	"github.com/pkg/errors"
@@ -134,6 +135,7 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *evmtypes.TraceConfi
 func (b *Backend) TraceBlock(height rpctypes.BlockNumber,
 	config *evmtypes.TraceConfig,
 	block *tmrpctypes.ResultBlock,
+	blockRes *tmrpctypes.ResultBlockResults,
 ) ([]*evmtypes.TxTraceResult, error) {
 	txs := block.Block.Txs
 	txsLength := len(txs)
@@ -147,6 +149,11 @@ func (b *Backend) TraceBlock(height rpctypes.BlockNumber,
 
 	var txsMessages []*evmtypes.MsgEthereumTx
 	for i, tx := range txs {
+		if !rpctypes.TxSuccessOrExceedsBlockGasLimit(blockRes.TxsResults[i]) {
+			b.logger.Debug("skipped failed ethereum tx at block result", "cosmos-hash", hexutil.Encode(tx.Hash()))
+			continue
+		}
+
 		decodedTx, err := txDecoder(tx)
 		if err != nil {
 			b.logger.Error("failed to decode transaction", "hash", txs[i].Hash(), "error", err.Error())
