@@ -469,27 +469,6 @@ func (suite *StateDBTestSuite) TestAccessList() {
 			suite.Require().True(addrPresent)
 			suite.Require().True(slotPresent)
 		}},
-		{"prepare access list", func(db vm.StateDB) {
-			al := ethtypes.AccessList{{
-				Address:     address3,
-				StorageKeys: []common.Hash{value1},
-			}}
-			db.PrepareAccessList(address, &address2, vm.PrecompiledAddressesBerlin, al)
-
-			// check sender and dst
-			suite.Require().True(db.AddressInAccessList(address))
-			suite.Require().True(db.AddressInAccessList(address2))
-			// check precompiles
-			suite.Require().True(db.AddressInAccessList(common.BytesToAddress([]byte{1})))
-			// check AccessList
-			suite.Require().True(db.AddressInAccessList(address3))
-			addrPresent, slotPresent := db.SlotInAccessList(address3, value1)
-			suite.Require().True(addrPresent)
-			suite.Require().True(slotPresent)
-			addrPresent, slotPresent = db.SlotInAccessList(address3, value2)
-			suite.Require().True(addrPresent)
-			suite.Require().False(slotPresent)
-		}},
 	}
 
 	for _, tc := range testCases {
@@ -747,12 +726,42 @@ func (suite *StateDBTestSuite) TestNativeAction() {
 	suite.Require().Equal(sdk.Events{{Type: "success1"}, {Type: "success3"}}, ctx.EventManager().Events())
 }
 
+func (suite *StateDBTestSuite) TestSetStorage() {
+	contract := common.BigToAddress(big.NewInt(101))
+
+	_, ctx, keeper := setupTestEnv(suite.T())
+	stateDB := statedb.New(ctx, keeper, emptyTxConfig)
+
+	stateDB.SetState(contract, common.BigToHash(big.NewInt(0)), common.BigToHash(big.NewInt(0)))
+	stateDB.SetState(contract, common.BigToHash(big.NewInt(1)), common.BigToHash(big.NewInt(1)))
+	stateDB.SetState(contract, common.BigToHash(big.NewInt(2)), common.BigToHash(big.NewInt(2)))
+	suite.Require().NoError(stateDB.Commit())
+
+	suite.Require().Equal(common.BigToHash(big.NewInt(0)), stateDB.GetState(contract, common.BigToHash(big.NewInt(0))))
+	suite.Require().Equal(common.BigToHash(big.NewInt(1)), stateDB.GetState(contract, common.BigToHash(big.NewInt(1))))
+	suite.Require().Equal(common.BigToHash(big.NewInt(2)), stateDB.GetState(contract, common.BigToHash(big.NewInt(2))))
+
+	stateDB.SetStorage(contract, map[common.Hash]common.Hash{
+		common.BigToHash(big.NewInt(1)): common.BigToHash(big.NewInt(3)),
+	})
+
+	suite.Require().Equal(common.Hash{}, stateDB.GetState(contract, common.BigToHash(big.NewInt(0))))
+	suite.Require().Equal(common.BigToHash(big.NewInt(3)), stateDB.GetState(contract, common.BigToHash(big.NewInt(1))))
+	suite.Require().Equal(common.Hash{}, stateDB.GetState(contract, common.BigToHash(big.NewInt(2))))
+}
+
+type StateDBWithForEachStorage interface {
+	ForEachStorage(common.Address, func(common.Hash, common.Hash) bool) error
+}
+
 func CollectContractStorage(db vm.StateDB, address common.Address) statedb.Storage {
 	storage := make(statedb.Storage)
-	db.ForEachStorage(address, func(k, v common.Hash) bool {
-		storage[k] = v
-		return true
-	})
+	if d, ok := db.(StateDBWithForEachStorage); ok {
+		d.ForEachStorage(address, func(k, v common.Hash) bool {
+			storage[k] = v
+			return true
+		})
+	}
 	return storage
 }
 

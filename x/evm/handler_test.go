@@ -514,19 +514,19 @@ func (suite *EvmTestSuite) deployERC20Contract() common.Address {
 	nonce := k.GetNonce(suite.ctx, suite.from)
 	ctorArgs, err := types.ERC20Contract.ABI.Pack("", suite.from, big.NewInt(10000000000))
 	suite.Require().NoError(err)
-	msg := ethtypes.NewMessage(
-		suite.from,
-		nil,
-		nonce,
-		big.NewInt(0),
-		2000000,
-		big.NewInt(1),
-		nil,
-		nil,
-		append(types.ERC20Contract.Bin, ctorArgs...),
-		nil,
-		true,
-	)
+	msg := core.Message{
+		From:              suite.from,
+		To:                nil,
+		Nonce:             nonce,
+		Value:             big.NewInt(0),
+		GasLimit:          2000000,
+		GasPrice:          big.NewInt(1),
+		GasFeeCap:         nil,
+		GasTipCap:         nil,
+		Data:              append(types.ERC20Contract.Bin, ctorArgs...),
+		AccessList:        nil,
+		SkipAccountChecks: true,
+	}
 	rsp, err := k.ApplyMessage(suite.ctx, msg, nil, true)
 	suite.Require().NoError(err)
 	suite.Require().False(rsp.Failed())
@@ -603,7 +603,7 @@ func (suite *EvmTestSuite) TestERC20TransferReverted() {
 
 			txData, err := types.UnpackTxData(tx.Data)
 			suite.Require().NoError(err)
-			fees, err := keeper.VerifyFee(txData, "aphoton", baseFee, true, true, suite.ctx.IsCheckTx())
+			fees, err := keeper.VerifyFee(txData, "aphoton", baseFee, true, true, true, suite.ctx.IsCheckTx())
 			suite.Require().NoError(err)
 			err = k.DeductTxCostsFromUserBalance(suite.ctx, fees, tx.GetSender())
 			suite.Require().NoError(err)
@@ -634,7 +634,7 @@ func (suite *EvmTestSuite) TestERC20TransferReverted() {
 }
 
 func (suite *EvmTestSuite) TestContractDeploymentRevert() {
-	intrinsicGas := uint64(134180)
+	intrinsicGas := uint64(134510)
 	testCases := []struct {
 		msg      string
 		gasLimit uint64

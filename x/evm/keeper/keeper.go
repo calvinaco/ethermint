@@ -36,6 +36,9 @@ import (
 	"github.com/evmos/ethermint/x/evm/types"
 )
 
+// CustomContractFn defines a custom precompiled contract generator with ctx, rules and returns a precompiled contract.
+type CustomContractFn func(sdk.Context, params.Rules) vm.PrecompiledContract
+
 // Keeper grants access to the EVM module state and implements the go-ethereum StateDB interface.
 type Keeper struct {
 	// Protobuf codec
@@ -70,8 +73,8 @@ type Keeper struct {
 	hooks types.EvmHooks
 
 	// Legacy subspace
-	ss              paramstypes.Subspace
-	customContracts []vm.PrecompiledContract
+	ss                paramstypes.Subspace
+	customContractFns []CustomContractFn
 
 	// a set of store keys that should cover all the precompile use cases,
 	// or ideally just pass the application's all stores.
@@ -89,7 +92,7 @@ func NewKeeper(
 	fmk types.FeeMarketKeeper,
 	tracer string,
 	ss paramstypes.Subspace,
-	customContracts []vm.PrecompiledContract,
+	customContractFns []CustomContractFn,
 	keys map[string]storetypes.StoreKey,
 ) *Keeper {
 	// ensure evm module account is set
@@ -104,18 +107,18 @@ func NewKeeper(
 
 	// NOTE: we pass in the parameter space to the CommitStateDB in order to use custom denominations for the EVM operations
 	return &Keeper{
-		cdc:             cdc,
-		authority:       authority,
-		accountKeeper:   ak,
-		bankKeeper:      bankKeeper,
-		stakingKeeper:   sk,
-		feeMarketKeeper: fmk,
-		storeKey:        storeKey,
-		transientKey:    transientKey,
-		tracer:          tracer,
-		ss:              ss,
-		customContracts: customContracts,
-		keys:            keys,
+		cdc:               cdc,
+		authority:         authority,
+		accountKeeper:     ak,
+		bankKeeper:        bankKeeper,
+		stakingKeeper:     sk,
+		feeMarketKeeper:   fmk,
+		storeKey:          storeKey,
+		transientKey:      transientKey,
+		tracer:            tracer,
+		ss:                ss,
+		customContractFns: customContractFns,
+		keys:              keys,
 	}
 }
 
@@ -271,7 +274,7 @@ func (k *Keeper) PostTxProcessing(ctx sdk.Context, msg core.Message, receipt *et
 
 // Tracer return a default vm.Tracer based on current keeper state
 func (k Keeper) Tracer(ctx sdk.Context, msg core.Message, ethCfg *params.ChainConfig) vm.EVMLogger {
-	return types.NewTracer(k.tracer, msg, ethCfg, ctx.BlockHeight())
+	return types.NewTracer(k.tracer, msg, ethCfg, ctx.BlockHeight(), ctx.BlockHeader().Time.Unix())
 }
 
 // GetAccount load nonce and codehash without balance,

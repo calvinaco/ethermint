@@ -16,11 +16,15 @@
 package types
 
 import (
+	"encoding/json"
+	"fmt"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
+	"github.com/evmos/ethermint/x/evm/statedb"
+	evmtypes "github.com/evmos/ethermint/x/evm/types"
 )
 
 // Copied the Account and StorageResult types since they are registered under an
@@ -70,6 +74,41 @@ type RPCTransaction struct {
 // StateOverride is the collection of overridden accounts.
 type StateOverride map[common.Address]OverrideAccount
 
+// Apply overrides the fields of specified accounts into the given state.
+func (diff *StateOverride) Apply(db *statedb.StateDB) error {
+	if diff == nil {
+		return nil
+	}
+	for addr, account := range *diff {
+		// Override account nonce.
+		if account.Nonce != nil {
+			db.SetNonce(addr, uint64(*account.Nonce))
+		}
+		// Override account(contract) code.
+		if account.Code != nil {
+			db.SetCode(addr, *account.Code)
+		}
+		// Override account balance.
+		if account.Balance != nil {
+			db.SetBalance(addr, (*big.Int)(*account.Balance))
+		}
+		if account.State != nil && account.StateDiff != nil {
+			return fmt.Errorf("account %s has both 'state' and 'stateDiff'", addr.Hex())
+		}
+		// Replace entire state if caller requires.
+		if account.State != nil {
+			db.SetStorage(addr, *account.State)
+		}
+		// Apply state diff into specified accounts.
+		if account.StateDiff != nil {
+			for key, value := range *account.StateDiff {
+				db.SetState(addr, key, value)
+			}
+		}
+	}
+	return nil
+}
+
 // OverrideAccount indicates the overriding fields of account during the execution of
 // a message call.
 // Note, state and stateDiff can't be specified at the same time. If state is
@@ -101,4 +140,9 @@ type OneFeeHistory struct {
 	BaseFee, NextBaseFee *big.Int   // base fee for each block
 	Reward               []*big.Int // each element of the array will have the tip provided to miners for the percentile given
 	GasUsedRatio         float64    // the ratio of gas used to the gas limit for each block
+}
+
+type TraceConfig struct {
+	evmtypes.TraceConfig
+	TracerConfig json.RawMessage `json:"tracerConfig"`
 }

@@ -36,6 +36,7 @@ TEST_CONTRACTS = {
     "StateContract": "StateContract.sol",
     "TestExploitContract": "TestExploitContract.sol",
     "TestRevert": "TestRevert.sol",
+    "TestMessageCall": "TestMessageCall.sol",
 }
 
 
@@ -128,6 +129,17 @@ def wait_for_block_time(cli, t):
         time.sleep(0.5)
 
 
+def wait_for_fn(name, fn, *, timeout=240, interval=1):
+    for i in range(int(timeout / interval)):
+        result = fn()
+        print("check", name, result)
+        if result:
+            return result
+        time.sleep(interval)
+    else:
+        raise TimeoutError(f"wait for {name} timeout")
+
+
 def deploy_contract(w3, jsonfile, args=(), key=KEYS["validator"]):
     """
     deploy contract and return the deployed contract instance
@@ -144,6 +156,7 @@ def create_contract_transaction(w3, jsonfile, args=(), key=KEYS["validator"]):
     info = json.loads(jsonfile.read_text())
     contract = w3.eth.contract(abi=info["abi"], bytecode=info["bytecode"])
     tx = contract.constructor(*args).build_transaction({"from": acct.address})
+    return tx
 
 
 def send_contract_transaction(w3, jsonfile, tx, key=KEYS["validator"]):

@@ -26,10 +26,13 @@ import (
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/params"
 	evmtypes "github.com/evmos/ethermint/x/evm/types"
 
 	"github.com/evmos/ethermint/store/cachemulti"
 )
+
+const StateDBContextKey = "statedb"
 
 type EventConverter = func(sdk.Event) (*ethtypes.Log, error)
 
@@ -72,6 +75,9 @@ type StateDB struct {
 	// Per-transaction access list
 	accessList *accessList
 
+	// Transient storage
+	transientStorage transientStorage
+
 	// events emitted by native action
 	nativeEvents sdk.Events
 
@@ -86,11 +92,8 @@ func New(ctx sdk.Context, keeper Keeper, txConfig TxConfig) *StateDB {
 }
 
 func NewWithParams(ctx sdk.Context, keeper Keeper, txConfig TxConfig, params evmtypes.Params) *StateDB {
-	cacheCtx := ctx.WithMultiStore(cachemulti.NewStore(ctx.MultiStore(), keeper.StoreKeys()))
-	return &StateDB{
+	db := &StateDB{
 		keeper:       keeper,
-		ctx:          ctx,
-		cacheCtx:     cacheCtx,
 		stateObjects: make(map[common.Address]*stateObject),
 		journal:      newJournal(),
 		accessList:   newAccessList(),
@@ -100,6 +103,9 @@ func NewWithParams(ctx sdk.Context, keeper Keeper, txConfig TxConfig, params evm
 		nativeEvents: sdk.Events{},
 		evmDenom:     params.EvmDenom,
 	}
+	db.ctx = ctx.WithValue(StateDBContextKey, db)
+	db.cacheCtx = db.ctx.WithMultiStore(cachemulti.NewStore(ctx.MultiStore(), keeper.StoreKeys()))
+	return db
 }
 
 func (s *StateDB) NativeEvents() sdk.Events {
@@ -385,6 +391,14 @@ func (s *StateDB) SubBalance(addr common.Address, amount *big.Int) {
 	}
 }
 
+func (s *StateDB) SetBalance(addr common.Address, amount *big.Int) {
+	if err := s.ExecuteNativeAction(common.Address{}, nil, func(ctx sdk.Context) error {
+		return s.keeper.SetBalance(ctx, addr, amount)
+	}); err != nil {
+		s.err = err
+	}
+}
+
 // SetNonce sets the nonce of account.
 func (s *StateDB) SetNonce(addr common.Address, nonce uint64) {
 	stateObject := s.getOrNewStateObject(addr)
@@ -404,9 +418,15 @@ func (s *StateDB) SetCode(addr common.Address, code []byte) {
 // SetState sets the contract state.
 func (s *StateDB) SetState(addr common.Address, key, value common.Hash) {
 	stateObject := s.getOrNewStateObject(addr)
-	if stateObject != nil {
-		stateObject.SetState(key, value)
-	}
+	stateObject.SetState(key, value)
+}
+
+// SetStorage replaces the entire storage for the specified account with given
+// storage. This function should only be used for debugging and the mutations
+// must be discarded afterwards.
+func (s *StateDB) SetStorage(addr common.Address, storage Storage) {
+	stateObject := s.getOrNewStateObject(addr)
+	stateObject.SetStorage(storage)
 }
 
 // Suicide marks the given account as suicided.
@@ -434,30 +454,81 @@ func (s *StateDB) Suicide(addr common.Address) bool {
 	return true
 }
 
-// PrepareAccessList handles the preparatory steps for executing a state transition with
-// regards to both EIP-2929 and EIP-2930:
+// SetTransientState sets transient storage for a given account. It
+// adds the change to the journal so that it can be rolled back
+// to its previous value if there is a revert.
+func (s *StateDB) SetTransientState(addr common.Address, key, value common.Hash) {
+	prev := s.GetTransientState(addr, key)
+	if prev == value {
+		return
+	}
+
+	s.journal.append(transientStorageChange{
+		account:  &addr,
+		key:      key,
+		prevalue: prev,
+	})
+
+	s.setTransientState(addr, key, value)
+}
+
+// setTransientState is a lower level setter for transient storage. It
+// is called during a revert to prevent modifications to the journal.
+func (s *StateDB) setTransientState(addr common.Address, key, value common.Hash) {
+	s.transientStorage.Set(addr, key, value)
+}
+
+// GetTransientState gets transient storage for a given account.
+func (s *StateDB) GetTransientState(addr common.Address, key common.Hash) common.Hash {
+	return s.transientStorage.Get(addr, key)
+}
+
+// Prepare handles the preparatory steps for executing a state transition with.
+// This method must be invoked before state transition.
 //
+// Berlin fork:
 // - Add sender to access list (2929)
 // - Add destination to access list (2929)
 // - Add precompiles to access list (2929)
 // - Add the contents of the optional tx access list (2930)
 //
-// This method should only be called if Yolov3/Berlin/2929+2930 is applicable at the current number.
-func (s *StateDB) PrepareAccessList(sender common.Address, dst *common.Address, precompiles []common.Address, list ethtypes.AccessList) {
-	s.AddAddressToAccessList(sender)
-	if dst != nil {
-		s.AddAddressToAccessList(*dst)
-		// If it's a create-tx, the destination will be added inside evm.create
-	}
-	for _, addr := range precompiles {
-		s.AddAddressToAccessList(addr)
-	}
-	for _, el := range list {
-		s.AddAddressToAccessList(el.Address)
-		for _, key := range el.StorageKeys {
-			s.AddSlotToAccessList(el.Address, key)
+// Potential EIPs:
+// - Reset access list (Berlin)
+// - Add coinbase to access list (EIP-3651)
+// - Reset transient storage (EIP-1153)
+func (s *StateDB) Prepare(
+	rules params.Rules,
+	sender,
+	coinbase common.Address,
+	dst *common.Address,
+	precompiles []common.Address,
+	list ethtypes.AccessList,
+) {
+	if rules.IsBerlin {
+		// Clear out any leftover from previous executions
+		al := newAccessList()
+		s.accessList = al
+
+		al.AddAddress(sender)
+		if dst != nil {
+			al.AddAddress(*dst)
+			// If it's a create-tx, the destination will be added inside evm.create
+		}
+		for _, addr := range precompiles {
+			al.AddAddress(addr)
+		}
+		for _, el := range list {
+			al.AddAddress(el.Address)
+			for _, key := range el.StorageKeys {
+				al.AddSlot(el.Address, key)
+			}
+		}
+		if rules.IsShanghai { // EIP-3651: warm coinbase
+			al.AddAddress(coinbase)
 		}
 	}
+	// Reset transient storage at the beginning of transaction execution
+	s.transientStorage = newTransientStorage()
 }
 
 // AddAddressToAccessList adds the given address to the access list

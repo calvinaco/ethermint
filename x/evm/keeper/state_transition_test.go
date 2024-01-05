@@ -171,6 +171,15 @@ func (suite *KeeperTestSuite) TestGetCoinbaseAddress() {
 	}
 }
 
+// toWordSize returns the ceiled word size required for init code payment calculation.
+func toWordSize(size uint64) uint64 {
+	if size > math.MaxUint64-31 {
+		return math.MaxUint64/32 + 1
+	}
+
+	return (size + 31) / 32
+}
+
 func (suite *KeeperTestSuite) TestGetEthIntrinsicGas() {
 	testCases := []struct {
 		name               string
@@ -206,7 +215,7 @@ func (suite *KeeperTestSuite) TestGetEthIntrinsicGas() {
 			1,
 			true,
 			true,
-			params.TxGas + params.TxDataNonZeroGasFrontier*1,
+			params.TxGas + params.TxDataNonZeroGasFrontier*1 + toWordSize(1)*params.InitCodeWordGas,
 		},
 		{
 			"no data, one accesslist, not contract creation, not homestead, not istanbul",
@@ -433,7 +442,7 @@ func (suite *KeeperTestSuite) TestRefundGas() {
 
 			vmdb.AddRefund(params.TxGas)
 
-			if tc.leftoverGas > m.Gas() {
+			if tc.leftoverGas > m.GasLimit {
 				return
 			}
 
@@ -441,7 +450,7 @@ func (suite *KeeperTestSuite) TestRefundGas() {
 				tc.malleate()
 			}
 
-			gasUsed := m.Gas() - tc.leftoverGas
+			gasUsed := m.GasLimit - tc.leftoverGas
 			refund := keeper.GasToRefund(vmdb.GetRefund(), gasUsed, tc.refundQuotient)
 			suite.Require().Equal(tc.expGasRefund, refund)
 
@@ -648,7 +657,7 @@ func (suite *KeeperTestSuite) TestApplyMessageWithConfig() {
 			txConfig = suite.app.EvmKeeper.TxConfig(suite.ctx, common.Hash{})
 
 			tc.malleate()
-			res, err := suite.app.EvmKeeper.ApplyMessageWithConfig(suite.ctx, msg, nil, true, config, txConfig)
+			res, err := suite.app.EvmKeeper.ApplyMessageWithConfig(suite.ctx, msg, nil, true, config, txConfig, nil, false)
 
 			if tc.expErr {
 				suite.Require().Error(err)
@@ -665,7 +674,7 @@ func (suite *KeeperTestSuite) TestApplyMessageWithConfig() {
 func (suite *KeeperTestSuite) createContractGethMsg(nonce uint64, signer ethtypes.Signer, cfg *params.ChainConfig, gasPrice *big.Int) (core.Message, error) {
 	ethMsg, err := suite.createContractMsgTx(nonce, signer, cfg, gasPrice)
 	if err != nil {
-		return nil, err
+		return core.Message{}, err
 	}
 
 	return ethMsg.AsMessage(nil)
